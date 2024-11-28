@@ -1,9 +1,13 @@
 #include <LittleFS.h>
 #include "BluetoothSerial.h"
-#include <RTClib.h>
-#define PIN_BOTON 13 
-RTC_DS3231 rtc;
+#include "esp_bt.h"
+#include <Ds1302.h>
+#define PIN_ENA 23
+#define PIN_CLK 18
+#define PIN_DAT 19
 
+#define PIN_BOTON 13 
+Ds1302 rtc(PIN_ENA, PIN_CLK, PIN_DAT);
 BluetoothSerial SerialBT;
 
 unsigned long actualmillis = 0;
@@ -27,17 +31,30 @@ union SensorData {
     uint16_t temp2;
     uint8_t hum1;
     uint8_t hum2;
-    uint8_t minuto;
-    uint8_t hora;
-    uint8_t dia;
-    uint8_t mes;
+    uint8_t min;
+    uint8_t h;
+    uint8_t d;
+    uint8_t m;
     uint16_t anio;
   } values;
   uint8_t buffer[12];
 };
+union ope {
+  struct {
+    uint8_t a;
+    uint8_t v1;
+    uint8_t v2;
+    uint8_t v3;
+    uint8_t min;
+    uint8_t h;
+    uint8_t d;
+    uint8_t m;
+  } values;
+  uint8_t buffer[8];
+};
 State state = comenzar;
 SensorData data;
-
+ope op;
 int compost_actual = 0;
 int etapa_actual = 0;
 
@@ -45,8 +62,16 @@ String path = "";
 
 
 void leerDeepSleepConfig() {
-  if (LittleFS.exists("/deep_sleep.bin")) {
-    File file = LittleFS.open("/deep_sleep.bin", "r");
+if (!LittleFS.exists("/deep_sleep.bin")) {
+    File file = LittleFS.open("/deep_sleep.bin", FILE_WRITE);
+    if (file) {
+      deepSleep = 5;
+      file.write((uint8_t*)&deepSleep, sizeof(deepSleep));
+      file.close();
+    } else {
+      Serial.println("Error al crear el archivo.");
+    }
+}else{   File file = LittleFS.open("/deep_sleep.bin", "r");
     if (file) {
       deepSleep = file.read();
       file.close();
@@ -54,17 +79,17 @@ void leerDeepSleepConfig() {
   }
 }
 
-void Suspension(uint8_t minutos, bool fin) {
+void Suspension(uint8_t mins, bool fin) {
 if (!fin){
-  if (minutos < 1) minutos = 1;
-  if (minutos > 180) minutos = 180; 
+  if (mins < 1) mins = 1;
+  if (mins > 180) mins = 180; 
 
   // Calcular el tiempo en microsegundos para el RTC interno
-  uint64_t tiempo_microsegundos = (uint64_t)minutos * 60 * 1000000;
+  uint64_t tiempo_microsegundos = (uint64_t)mins * 60 * 1000000;
 
   // Configurar el tiempo de suspensión
   esp_sleep_enable_timer_wakeup(tiempo_microsegundos);
-  Serial.printf("Configurado para dormir %d minuto(s)...\n", minutos);
+  Serial.printf("Configurado para dormir %d min(s)...\n", mins);
    }
   // Configurar el botón como fuente de despertador
   esp_sleep_enable_ext0_wakeup(GPIO_NUM_13, 0); // Nivel bajo en GPIO13
@@ -190,7 +215,7 @@ bool archivoRegistrado(const String& filename) {
 
 //-------------------------------------------------
 void guardarDatos(SensorData data, String path) {
-if(compost_actual>1){  
+if(compost_actual<1){  
   File file = LittleFS.open(path.c_str(), FILE_WRITE);
 
   if (file) {
@@ -210,9 +235,35 @@ if(compost_actual>1){
     Serial.println("Error al abrir el archivo para escritura.");
   }
   }
-
 }
+void guardarDatos(ope data) {
+  File file = LittleFS.open("/ope.bin", FILE_READ);
 
+  if (!file || file.size() == 0) { // Verifica si no existe o está vacío
+    file.close(); // Cierra el archivo en modo lectura
+
+    // Intenta abrirlo en modo escritura
+    file = LittleFS.open("/ope.bin", FILE_WRITE);
+    if (file) {
+      file.write((uint8_t *)data.buffer, sizeof(data.buffer)); // Escribe los datos
+      file.close(); // Cierra el archivo correctamente
+      Serial.println("Datos guardados exitosamente.");
+    } else {
+      Serial.println("Error: No se pudo abrir el archivo para escribir.");
+    }
+  } else {
+    file = LittleFS.open("/ope.bin", FILE_WRITE);
+    if (file) {
+      file.write((uint8_t *)data.buffer, sizeof(data.buffer)); // Escribe los datos
+      file.close(); // Cierra el archivo correctamente
+      Serial.println("Datos guardados exitosamente.");
+    } else {
+      Serial.println("Error: No se pudo abrir el archivo para escribir.");
+    }
+    Serial.println("Archivo existente y con datos.");
+    file.close(); // Cierra el archivo si estaba abierto en modo lectura
+  }
+}
 
 void interactua_func() {
 
@@ -220,14 +271,11 @@ void interactua_func() {
     String command = SerialBT.readString();
     command.trim();
 if (command == "estado") {
-  if (LittleFS.exists("/name_ble.bin")) {
-    File file = LittleFS.open("/name_ble.bin", "r");
-    String nameBLE = file.readString();
-    file.close();
-    SerialBT.println("Nombre Bluetooth actual: " + nameBLE);
-  } else {
-    SerialBT.println("No se encontró el archivo /name_ble.bin.");
-  }
+  delay(50);
+    SerialBT.println("Tem1: "+ data.values.temp1);
+    SerialBT.println("Tem2: "+ data.values.temp2);
+    SerialBT.println("Hum1: "+ data.values.hum1);
+    SerialBT.println("Hum2: "+ data.values.hum2);
 
   // Leer y mostrar los umbrales (si existe el archivo)
   if (LittleFS.exists("/umbrales.bin")) {
@@ -252,10 +300,11 @@ if (command == "estado") {
 }
    if (command == "guia") {
     SerialBT.println("Dormir ---> DD");
+    SerialBT.println("Interaccion ---> O");
     SerialBT.println("Leer registros existentes ---> R");
     SerialBT.println("Leer archivo --> R:indice");
     SerialBT.println("C/N ---> C/N:00.0000.00 (eje: 02.3011.29 -> C: 2.3, N: 11.11");
-    SerialBT.println("Nueva fecha ---> F:DDMMYYYYHHMM");
+    SerialBT.println("Nueva fecha ---> F:DDMMYYHHMM");
     SerialBT.println("Deep Sleep ---> D:Min (eje: 5, 8");
    }
     if(command == "DD"){
@@ -265,7 +314,9 @@ if (command == "estado") {
        SerialBT.println(" min");
        Suspension(deepSleep,fin); 
        }
-  
+  if(command == "O"){
+      sendFile("/ope.bin");
+    }
 if (command.startsWith("C/N:")) {
   String valores = command.substring(4); // Extraer después de "C/N:"
 
@@ -279,6 +330,15 @@ if (command.startsWith("C/N:")) {
             SerialBT.println("Balance C/N: " + String(relacion, 2));
             if (relacion >= 20.0 && relacion <= 30.0) {
                 SerialBT.println("Relación C/N estable. Puede comenzar el compostaje.");
+                op.values.a=0;
+                op.values.v1=relacion;
+                op.values.v2=carbono;
+                op.values.v3=nitrogeno;                
+                op.values.min = 0;
+                op.values.h =0;
+                op.values.d = 0;
+                op.values.m = 0;
+                guardarDatos(op);
             } else {
                 SerialBT.println("Relación C/N inestable. Ajuste las proporciones.");
               if (relacion < 20.0) {
@@ -295,19 +355,19 @@ if (command.startsWith("C/N:")) {
   }
 }
 if (command.startsWith("D:")) {
-  String minutosStr = command.substring(2);
-  uint8_t minutos = minutosStr.toInt();
-  if (minutos > 0) {
+  String minsStr = command.substring(2);
+  uint8_t mins = minsStr.toInt();
+  if (mins > 0) {
     File file = LittleFS.open("/deep_sleep.bin", "w");
     if (file) {
-      file.write(minutos);  // Guardar los minutos en el archivo
+      file.write(mins);  // Guardar los mins en el archivo
       file.close();
-      SerialBT.println("Configurado para Deep Sleep por " + String(minutos) + " minutos.");
+      SerialBT.println("Configurado para Deep Sleep por " + String(mins) + " mins.");
    } else {
       SerialBT.println("Error al guardar el archivo /deep_sleep.bin.");
     }
   } else {
-    SerialBT.println("Error: El valor de minutos debe ser mayor a 0.");
+    SerialBT.println("Error: El valor de mins debe ser mayor a 0.");
   }
 }
    if (command.startsWith("U:")) {                                                 
@@ -320,24 +380,33 @@ if (command.startsWith("D:")) {
 
     guardarUmbrales(u0, u1, u2);  // Llama a la función para guardar los umbrales
     SerialBT.println("Asignados: " + String(u0) + ", " + String(u1) + ", " + String(u2));
+        op.values.a=1;
+    op.values.v1=u0;
+    op.values.v2=u1;
+    op.values.v3=u2;                
+    op.values.min = 0;
+    op.values.h =0;
+    op.values.d = 0;
+    op.values.m = 0;
+    guardarDatos(op);
   } else {
     SerialBT.println("Error: Formato incorrecto. Use UXXYYZZ (6 dígitos).");
   }
 } else if (command.startsWith("F:")) {                                             //Mostar fecha anterior
   String dateTime = command.substring(2);  // Extrae la cadena después de "F:"
   
-  if (dateTime.length() == 12) {  // Asegura que el formato sea correcto
-    String dia = dateTime.substring(0, 2);
-    String mes = dateTime.substring(2, 4);
-    String anio = dateTime.substring(4, 8);
-    String hora = dateTime.substring(8, 10);
-    String minuto = dateTime.substring(10, 12);
+  if (dateTime.length() == 10) {  // Asegura que el formato sea correcto
+    String d = dateTime.substring(0, 2);
+    String m = dateTime.substring(2, 4);
+    String anio = dateTime.substring(4, 6);
+    String h = dateTime.substring(6, 8);
+    String min = dateTime.substring(8, 10);
 
-    String fecha = dia + "/" + mes + "/" + anio;
-    String horaCompleta = hora + ":" + minuto + ":00";
+    String fecha = d + "/" + m + "/" + anio;
+    String hCompleta = h + ":" + min + ":00";
 
-    configurarFechaHora(fecha, horaCompleta);  // Configura la fecha y hora
-    SerialBT.println("Fecha y hora configuradas: " + fecha + " " + horaCompleta);
+    configurarFechah(fecha, hCompleta);  // Configura la fecha y h
+    SerialBT.println("Fecha y h configuradas: " + fecha + " " + hCompleta);
   } else {
     SerialBT.println("Error: Formato incorrecto. Usa F:DDMMYYYYHHMM");
   }
@@ -423,8 +492,8 @@ void sendFile(String path) {
 
     String dataString = String(te1) + "," + String(te2) + "," +
                         String(data.values.hum1) + "," + String(data.values.hum2) + "," +
-                        String(data.values.minuto) + "," + String(data.values.hora) + "," +
-                        String(data.values.dia) + "," + String(data.values.mes) + "," +
+                        String(data.values.min) + "," + String(data.values.h) + "," +
+                        String(data.values.d) + "," + String(data.values.m) + "," +
                         String(data.values.anio) + "\n";
 
     // Enviar cada línea de datos ASCII por Bluetooth
@@ -452,23 +521,33 @@ void guardarUmbrales(uint8_t umbral0, uint8_t umbral1, uint8_t umbral2) {
   }
 }
 
-// Configurar fecha y hora
-void configurarFechaHora(const String& fecha, const String& hora) {
-  int dia = fecha.substring(0, 2).toInt();
-  int mes = fecha.substring(3, 5).toInt();
-  int anio = fecha.substring(6, 10).toInt();
-  int hora_actual = hora.substring(0, 2).toInt();
-  int minuto = hora.substring(3, 5).toInt();
-  int segundo = hora.substring(6, 8).toInt();
+// Configurar fecha y h
+void configurarFechah(const String& fecha, const String& h) {
+  uint8_t d = fecha.substring(0, 2).toInt();
+  uint8_t m = fecha.substring(3, 5).toInt();
+  uint8_t anio = fecha.substring(6, 10).toInt();
+  uint8_t h_actual = h.substring(0, 2).toInt();
+  uint8_t min = h.substring(3, 5).toInt();
+  uint8_t segundo = h.substring(6, 8).toInt();
 
-  if (dia <= 0 || mes <= 0 || anio <= 0 || hora_actual < 0 || minuto < 0 || segundo < 0) {
-    Serial.println("Formato de fecha u hora no válido.");
+  if (d <= 0 || m <= 0 || anio <= 0 || h_actual < 0 || min < 0 || segundo < 0) {
+    Serial.println("Formato de fecha u h no válido.");
     return;
   }
+  rtc.init();
+ 
+        Ds1302::DateTime dt = {
+            .year = anio,
+            .month = Ds1302::MONTH_OCT,
+            .day = d,
+            .hour = h_actual,
+            .minute = min,
+            .second = segundo,
+            .dow = Ds1302::DOW_TUE
+        };
 
-  DateTime dt(anio, mes, dia, hora_actual, minuto, segundo);
-  rtc.adjust(dt);
-  Serial.println("Fecha y hora configuradas exitosamente.");
+        rtc.setDateTime(&dt);
+         Serial.println("Fecha y h configuradas exitosamente.");
 }
 
 // ---------------- SETUP ----------------
@@ -478,23 +557,30 @@ if (!LittleFS.begin()) {
     Serial.println("Error al inicializar LittleFS.");
     while (true);
 }
+    // initialize the RTC
+    rtc.init();
 
-  if (SerialBT.begin("ESP32")) {
-    Serial.println("Bluetooth inicializado.");
-  } else {
-    Serial.println("Error al inicializar Bluetooth.");
-  }
-  if (!rtc.begin()) {
-    Serial.println("Error al inicializar RTC.");
-  }
-  manejarEtapaActual(state);
-   Serial.print("Setup: ");
-  Serial.println(state);
+    // test if clock is halted and set a date-time (see example 2) to start it
+    if (rtc.isHalted())
+    {
+        Serial.println("RTC is halted. Setting time...");
+
+        Ds1302::DateTime dt = {
+            .year = 24,
+            .month = Ds1302::MONTH_OCT,
+            .day = 26,
+            .hour = 22,
+            .minute = 33,
+            .second = 30,
+            .dow = Ds1302::DOW_TUE
+        };
+
+        rtc.setDateTime(&dt);
+    }
+
   manejarCompostActual();
-  crearArchivoCompostEtapa();
-  int c=0;
-  leerDeepSleepConfig();
-  
+
+  uint8_t c=0;
   pinMode(PIN_BOTON, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(PIN_BOTON), PulsacionBoton, FALLING);
  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
@@ -508,7 +594,8 @@ void loop() {
     estado_activo=false;
   }
   actualmillis = millis();
-  DateTime time = rtc.now();
+ Ds1302::DateTime now;
+ rtc.getDateTime(&now);
   switch (state) {
     case comenzar:
       if (actualmillis - ant_millis > intervalotem) {
@@ -541,19 +628,20 @@ void loop() {
     data.values.temp2 = 0;
     data.values.hum1 = 0;
     data.values.hum2 = 0;
-    data.values.minuto = 0;
-    data.values.hora =0;
-    data.values.dia = 0;
-    data.values.mes = 0;
-    data.values.anio = 0;
+    data.values.anio = now.year;
+    data.values.m = now.month;
+    data.values.d = now.day;
+    data.values.h =now.hour;
+    data.values.min = now.minute;
     guardarDatos(data,path);
-
+    
         //  if(data1.temperature > umbral_estado1) {
-        if(45 > 43) {
+        if(4 > 43) {
         Serial.println("Fin estado: Temperatura superada");
         state = estado1;
          }
-        
+          leerDeepSleepConfig();
+          Suspension(deepSleep,fin);
         break;
       case estado1:
         if(c == 1 ){
@@ -566,19 +654,21 @@ void loop() {
     data.values.temp2 = 1;
     data.values.hum1 = 1;
     data.values.hum2 = 1;
-    data.values.minuto = 1;
-    data.values.hora = 1;
-    data.values.dia = 1;
-    data.values.mes = 1;
-    data.values.anio = 1;
+    data.values.min = now.minute;
+    data.values.h =now.hour;
+    data.values.d = now.day;
+    data.values.m = now.month;
+    data.values.anio = now.year;
     guardarDatos(data,path);
 
 	//     if(data1.temperature > umbral_estado2) {    
-        if(50 > 20) {
+        if(10 > 20) {
         Serial.println("Fin estado: Temperatura superada");
         state = estado2;
          }
-
+          leerDeepSleepConfig();
+          Suspension(deepSleep,fin);
+        
         break;
       case estado2:
       if(c == 2){
@@ -592,11 +682,11 @@ void loop() {
     data.values.temp2 = 2;
     data.values.hum1 = 2;
     data.values.hum2 = 2;
-    data.values.minuto = 2;
-    data.values.hora = 2 ;
-    data.values.dia = 2;
-    data.values.mes = 2;
-    data.values.anio = 2;
+    data.values.min = now.minute;
+    data.values.h =now.hour;
+    data.values.d = now.day;
+    data.values.m = now.month;
+    data.values.anio = now.year;
     guardarDatos(data,path);
 
 // if(data1.temperature < data2.temperature + 2.0) {
@@ -607,17 +697,20 @@ void loop() {
         fin = true; 
         Serial.print(state);
         }
-        //mostrar si permanece aun cuando se interactua
-        Serial.print(state);
-        delay(2000);
-        break;
+          leerDeepSleepConfig();
+          Suspension(deepSleep,fin);
+                break;
       case interactua: {
+            SerialBT.begin("ESP32");    // Inicia BluetoothSerial con el nombre del dispositivo
           actualmillis = millis(); // Guardar el tiempo inicial
-          const unsigned long tiempoEspera = 60000; // 60 segundos en milisegundos
+          const unsigned long tiempoEspera = 120000; // 120 segundos en milisegundos
           while (true) {
-                interactua_func();
+            interactua_func();
                     if (millis() - actualmillis >= tiempoEspera) {
-                    SerialBT.println("Sesion finalizada");
+
+                     SerialBT.end();                      // Finaliza BluetoothSerial
+//                    esp_bluedroid_disable();             // Desactiva el stack Bluetooth
+  //                  esp_bluedroid_deinit();  
                     state=comenzar;
                      break; // Salir de la función
                     }
@@ -644,8 +737,7 @@ void loop() {
           }
           leerDeepSleepConfig();
           Serial.println("Entrando en modo esperar...");
-          SerialBT.println("Entrando en Deep Sleep por " + String(deepSleep) + " minutos.");
-          if()
+          SerialBT.println("Entrando en Deep Sleep por " + String(deepSleep) + " mins.");
           Suspension(deepSleep,fin);
           break;
       }
@@ -653,4 +745,3 @@ void loop() {
       break;
   }  
 }
-
